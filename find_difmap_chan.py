@@ -25,15 +25,13 @@ def find_difmap_chan (inna, incl, indisk=1, inseq=1):
     else:
         output = '%s_%s'%(inna,incl)
     data = WizAIPSUVData(inna,incl,indisk,inseq)
-    for i in range(0,len(data),INCR):
-        v = data[i].visibility
+    for i in data:
+        v = i.visibility
         na = np.asarray(np.ravel(v[:,:,0,0]),dtype='bool')
         try:
             a = na | a
         except:
             a = np.copy(na)
-        if not i%36000:
-            print 'Processing vis %d / %d'%(i,len(data))
     bstart, bend = [],[]
     for i in range(len(a)):
         if (i==0 and a[i]) or (i!=0 and a[i] and not a[i-1]):
