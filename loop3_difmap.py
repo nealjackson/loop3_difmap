@@ -1,10 +1,18 @@
 import numpy as np,os,glob,sys
-#import losoto; from losoto.h5parm import h5parm
+import losoto; from losoto.h5parm import h5parm
 from pyrap.tables import table
+#  Set paths for ParselTongue (optional) and Difmap (compulsory)
+#  these are CEP3, njj laptop and Herts cluster respectively
+#  The difmap installation must be built with the modified corplt.c 
+#     from  https://github.com/nealjackson/loop3_difmap
+#  You will also need PGPLOT_FONT=/soft/pgplot/grfont.dat
+#     and PGPLOT_DIR=/soft/pgplot  (or wherever pgplot lives)
 #PT = '/opt/cep/parseltongue/parseltongue-2.3/bin/ParselTongue'
-PT = '/home/njj/root_overflow/parseltongue-2.1/bin/ParselTongue'
-DIFMAP = '/pkg/uvf_difmap/difmap'
+#PT = '/home/njj/root_overflow/parseltongue-2.1/bin/ParselTongue'
+PT = '/soft/parseltongue-2.3/bin/ParselTongue'
+#DIFMAP = '/pkg/uvf_difmap/difmap'
 #DIFMAP = '/home/jackson/uvf_difmap/difmap'
+DIFMAP = '/home/morabito/software/uvf_difmap/difmap'
 try:
     from AIPSData import AIPSUVData
     from AIPSTask import AIPSTask,AIPSList,AIPSMessageLog
@@ -14,7 +22,8 @@ try:
 except:
     HAVE_AIPS = False
 
-def find_difmap_chan (infile,indisk=1,inseq=1):
+# given FITS file, return list of good channels
+def find_chan_fits (infile,indisk=1,inseq=1):
     try:
         AIPSUVData('DIFMAP','UVDATA',indisk,inseq).zap()
         print ('Removed DIFMAP.UVDATA.%d disk %d'%(inseq,indisk))
@@ -52,7 +61,8 @@ def chan2write (output, a):
     fo.write('\n')
     fo.close()
 
-def check_ms (filename,datacolumn="CORRECTED_DATA",flagname="FLAG"):
+# given MS file, return list of good channels
+def find_chan_ms (filename,datacolumn="CORRECTED_DATA",flagname="FLAG"):
     # open ms
     ms=table(filename,ack=False)
     # read data, flags
@@ -67,6 +77,8 @@ def check_ms (filename,datacolumn="CORRECTED_DATA",flagname="FLAG"):
             goodchans.append(i)
     return goodchans
 
+# convert corplt output to an amp/phase array - note
+# that the UTs are arbitrary **** needs fixing ****
 def corplt2array():
     f = open('./CORPLT')
     fc = f.readlines()
@@ -80,8 +92,7 @@ def corplt2array():
         if ls[0]=='Stn':
             stn = np.append(stn,ls[3])
         if len(ls)==4 and ls[0] in ['Amp','Phs']:
-            ut.append(float(ls[1]))  # faster than numpy append
-    
+            ut.append(float(ls[1]))  # faster than numpy append    
     ut = np.unique(np.asarray(ut,dtype='f'))
     amp = np.ones((len(stn),len(ut)))*np.nan
     phs = np.ones((len(stn),len(ut)))*np.nan
@@ -110,33 +121,49 @@ def clean_selfcal_loop (fs,weight):
     fs.write('	until(peak(flux,max)/imstat(rms) < clean_sigma)\n')
     fs.write('end if\n')
 
-def get_isfits (filename):
-    os.system('od -c -N 6 %s>isfits_temp'%filename)
-    if open('isfits_temp').readline()=='0000000   S   I   M   P   L   E\n':
-        return True
-    return False
-    
-def dif_script (infile,pol='XX',aipsno=340,clean_sigma=6,map_size=512,\
-                pixel_size=100,obs_length=900,datacolumn='CORRECTED_DATA'):
-    isfits = get_isfits(infile)
+# Process the input file supplied, converting to FITS if needed, and write
+# a dchan_XXX file containing the bad channels.
+def file2fits(infile):
+    isfits = open(infile).read(6)=='SIMPLE'   # Is it FITS?
+    # Process file itself. If FITS, add '.fits' to the filename and any dchan_
+    # file if not present already. Otherwise convert to FITS, replacing any '.ms'
+    # or '.MS' extension with '.fits'. Do the same for any associated dchan_ file
     if isfits:
-        fitsfile = infile
+        if infile[-5:]!='.fits':
+            os.system ('mv %s %s.fits'%(infile,infile))
+            if os.path.isfile('dchan_%s'%infile):
+                os.system ('mv dchan_%s dchan_%s.fits'%(infile,infile))
+            fitsfile=infile+'.fits'
+        else:
+            fitsfile=infile
     else:
         if infile[-3:] in ['.MS','.ms']:
             fitsfile = infile[:-3]+'.fits' 
         else:
             fitsfile = infile+'.fits'
         os.system('ms2uvfits in=%s out=%s writesyscal=F'%(infile,fitsfile))
+    # Check for presence of a dchan_file. If not, use find_chan_fits or
+    # find_chan_ms as necessary
     if not os.path.isfile('dchan_'+fitsfile):
         if isfits:
             if HAVE_AIPS:
-                a = find_difmap_chan (fitsfile)
+                a = find_chan_fits (fitsfile)
             else:
-                pass
-                # convert to MS here and use check_ms
+                print ('FITS file provided but no AIPS available, so cannot')
+                print ('find the flagged channels, aborting. Either use AIPS')
+                print ('or provide a file called dchan_[infile] with a select')
+                print ('command e.g. select I,1,49,51,100 if channel 50 is bad.')
+                exit(0)
         else:
-            a = check_ms(infile,datacolumn=datacolumn)
+            a = find_chan_ms(infile,datacolumn=datacolumn)
         chan2write('dchan_'+fitsfile,a)
+    return fitsfile
+
+# Write and execute the difmap script
+def dif_script (infile,pol='XX',aipsno=340,clean_sigma=6,map_size=512,\
+                pixel_size=100,obs_length=900,datacolumn='CORRECTED_DATA',\
+                startmod=True):
+    fitsfile = file2fits(infile)
     # Open script and declare variables
     fs = open('dif_script','w')
     fs.write('float clean_sigma; clean_sigma = %f\n'%clean_sigma)
@@ -152,7 +179,7 @@ def dif_script (infile,pol='XX',aipsno=340,clean_sigma=6,map_size=512,\
     fs.write('%s'%fsel.readline().replace('I',pol))
     fsel.close()
     fs.write('mapsize map_size,pixel_size\n')
-    fs.write('startmod "",1\n')
+    fs.write('startmod "",1\n' if startmod else 'clean\n')
     fs.write('peakwin 1.5\nselfcal false,false,0\n')
     clean_selfcal_loop (fs,'2,0')
     clean_selfcal_loop (fs,'2,-1')
@@ -185,37 +212,35 @@ def dif_script (infile,pol='XX',aipsno=340,clean_sigma=6,map_size=512,\
              fitsfile.replace('.fits','_auto%s'%pol))
     fs.write('save %s\nquit\n' % fitsfile.replace('.fits','_auto%s'%pol))
     fs.close()
-
     os.system('%s <dif_script'%DIFMAP)
+    return fitsfile
 
+#  **** Top-level routine to process an input visibility file ***
 # Specified file may be fits or MS
 # If MS, will be inspected for good channels and converted to FITS for mapping
 #    (any .MS or .ms extension converted to .fits, otherwise .fits added)
 #    Corrected_data column assumed unless otherwise specified
 # If FITS and we have AIPS/Parseltongue, then inspected for good channels
-#    in AIPS and mapped
-# If FITS and we do not have AIPS/Parseltongue, converted to ms for inspection
-#    of good channels and the original FITS file mapped
-    
-def loop3_difmap (infile,datacolumn='CORRECTED_DATA'):
+#    in AIPS and mapped, *If no AIPS and no good-channel file, exit with error*.
+# We assume that XX and YY have the same number of telescopes and UTs, and also
+#    the same bad/missing channels, and image separately for separate XX/YY corrs
+def loop3_difmap (infile,datacolumn='CORRECTED_DATA',startmod=True):
     os.system('rm CORPLT')
-    infile = dif_script(infile,'XX')
+    fitsfile = dif_script(infile,'XX',startmod=startmod)
     ampXX,amperrXX,phsXX,phserrXX,utXX,stnXX = corplt2array()
     os.system('mv CORPLT CORPLT_XX')
-    infile = dif_script(infile,'YY')
+    fitsfile = dif_script(infile,'YY',startmod=startmod)
     ampYY,amperrYY,phsYY,phserrYY,utYY,stnYY = corplt2array()
     os.system('mv CORPLT CORPLT_YY')
-    #   nb assumes XX and YY solutions have same number of telescopes and UTs -
-    #   combine properly if this is not the case
     amp = np.rollaxis(np.dstack((ampXX,ampYY)),2,0)
     amperr = np.rollaxis(np.dstack((amperrXX,amperrYY)),2,0)
     phs = np.rollaxis(np.dstack((phsXX,phsYY)),2,0)
     phserr = np.rollaxis(np.dstack((phserrXX,phserrYY)),2,0)
     ut,stn = utXX,stnXX
-#    h5parmfile = infile.replace('.fits','_auto.h5')
-#    data = h5parm(h5parmfile, readonly = False)
-#    outSolset = data.makeSolset('sol000')
-#    outSolset.makeSoltab(soltype='amplitude',soltabName='amplitude000',axesNames=['pol','ant','time'],axesVals=[['XX','YY'],stn,ut],vals=amp,weights=np.ones_like(amp))
-#    outSolset.makeSoltab(soltype='phase',soltabName='phase000',axesNames=['pol','ant','time'],axesVals=[['XX','YY'],stn,ut],vals=phs,weights=np.ones_like(phs))
-#    data.close()
+    h5parmfile = fitsfile.replace('.fits','_auto.h5')
+    data = h5parm(h5parmfile, readonly = False)
+    outSolset = data.makeSolset('sol000')
+    outSolset.makeSoltab(soltype='amplitude',soltabName='amplitude000',axesNames=['pol','ant','time'],axesVals=[['XX','YY'],stn,ut],vals=amp,weights=np.ones_like(amp))
+    outSolset.makeSoltab(soltype='phase',soltabName='phase000',axesNames=['pol','ant','time'],axesVals=[['XX','YY'],stn,ut],vals=phs,weights=np.ones_like(phs))
+    data.close()
     
